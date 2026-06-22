@@ -11,7 +11,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.data.database.AppDatabase
 import com.example.data.database.AudioNote
+import com.example.data.database.AudioNotePart
 import com.example.data.repository.AudioNoteRepository
+import com.example.util.AudioSplitter
 import com.example.data.network.Content
 import com.example.data.network.GenerateContentRequest
 import com.example.data.network.InlineData
@@ -144,6 +146,18 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun resumeProcessing(noteId: Int) {
+        transcribeAndSummarizeNote(noteId)
+    }
+
+    fun getPartsForNote(noteId: Int): StateFlow<List<AudioNotePart>> {
+        return repository.getPartsForNote(noteId).stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+    }
+
     private fun transcribeAndSummarizeNote(noteId: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             val note = repository.getAudioNoteByIdSuspend(noteId) ?: return@launch
@@ -156,6 +170,7 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
+                // Check for API key
                 var apiKey = userApiKey.value
                 if (apiKey.isBlank()) {
                     apiKey = BuildConfig.GEMINI_API_KEY
@@ -174,65 +189,172 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                val bytes = file.readBytes()
-                val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                // Get or create parts
+                var parts = repository.getPartsForNoteSuspend(noteId)
+                if (parts.isEmpty()) {
+                    // Split the file using AudioSplitter
+                    val splitDir = File(getApplication<Application>().cacheDir, "splits").apply { mkdirs() }
+                    // 15 minutes is 15 * 60 * 1000L ms
+                    val chunkDurationMs = 15 * 60 * 1000L
+                    val splitFiles = AudioSplitter.splitAudio(file, splitDir, chunkDurationMs)
+                    
+                    if (splitFiles.isEmpty()) {
+                        repository.updateAudioNote(note.copy(status = "failed", transcript = "خطا در بخش‌بندی فایل صوتی."))
+                        return@launch
+                    }
 
-                val promptText = """
-                    You are an expert audio dialogue transcriber and summarizer. Your task is to transcribe the provided audio conversation and summarize it.
-                    Provide your response EXACTLY in the following format. Do not add any conversational filler before or after.
-
-                    === TRANSCRIPT ===
-                    [Transcribe the full audio conversation precisely here in its spoken language, maintaining paragraphs and formatting]
-
-                    === SUMMARY ===
-                    [Write a highly detailed, professional summary of the conversation in Persian (Farsi), including: key topics, conclusions, and action items]
-                """.trimIndent()
-
-                val request = GenerateContentRequest(
-                    contents = listOf(
-                        Content(
-                            parts = listOf(
-                                Part(text = promptText),
-                                Part(inlineData = InlineData(mimeType = note.mimeType, data = base64Audio))
-                            )
+                    val partsToInsert = splitFiles.mapIndexed { index, splitFile ->
+                        AudioNotePart(
+                            noteId = noteId,
+                            partNumber = index + 1,
+                            filePath = splitFile.absolutePath,
+                            durationMs = getAudioDuration(splitFile),
+                            status = "pending"
                         )
+                    }
+                    repository.insertAudioNoteParts(partsToInsert)
+                    parts = repository.getPartsForNoteSuspend(noteId)
+                }
+
+                // Update total parts count on note
+                repository.updateAudioNote(
+                    repository.getAudioNoteByIdSuspend(noteId)!!.copy(
+                        status = "processing",
+                        totalParts = parts.size
                     )
                 )
 
-                val response = RetrofitClient.service.generateContent(apiKey, request)
-                val fullResponseText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                // Now loop through pending/failed parts and process them
+                for (part in parts) {
+                    if (part.status == "success") continue
 
-                if (fullResponseText != null) {
-                    val parts = fullResponseText.split("=== SUMMARY ===")
-                    var transcriptVal = parts.getOrNull(0)?.replace("=== TRANSCRIPT ===", "")?.trim()
-                    var summaryVal = parts.getOrNull(1)?.trim()
+                    // Mark part as processing
+                    repository.updateAudioNotePart(part.copy(status = "processing"))
 
-                    if (transcriptVal.isNullOrBlank() || summaryVal.isNullOrBlank()) {
-                        transcriptVal = fullResponseText
-                        summaryVal = "خلاصه گفتگو در متن گفتگو گنجانده شده است یا فرمت پاسخ تغییر یافته است."
+                    // Calculate current progress before we send API request
+                    val currentParts = repository.getPartsForNoteSuspend(noteId)
+                    val successCount = currentParts.count { it.status == "success" }
+                    val progressPercent = ((successCount.toFloat() / currentParts.size.toFloat()) * 100).toInt()
+                    repository.updateAudioNote(
+                        repository.getAudioNoteByIdSuspend(noteId)!!.copy(
+                            status = "processing",
+                            progressPercent = progressPercent
+                        )
+                    )
+
+                    try {
+                        val partFile = File(part.filePath)
+                        if (!partFile.exists()) {
+                            repository.updateAudioNotePart(part.copy(status = "failed", transcript = "فایل بخش مربوطه پیدا نشد."))
+                            continue
+                        }
+
+                        val bytes = partFile.readBytes()
+                        val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+                        val promptText = """
+                            You are an expert audio dialogue transcriber and summarizer. Your task is to transcribe the provided audio conversation and summarize it.
+                            Provide your response EXACTLY in the following format. Do not add any conversational filler before or after.
+
+                            === TRANSCRIPT ===
+                            [Transcribe this part of the audio conversation precisely here in its spoken language, maintaining paragraphs and formatting]
+
+                            === SUMMARY ===
+                            [Write a highly detailed, professional summary of this part of the conversation in Persian (Farsi), including: key topics, conclusions, and action items discussed in this part]
+                        """.trimIndent()
+
+                        val request = GenerateContentRequest(
+                            contents = listOf(
+                                Content(
+                                    parts = listOf(
+                                        Part(text = promptText),
+                                        Part(inlineData = InlineData(mimeType = note.mimeType, data = base64Audio))
+                                    )
+                                )
+                            )
+                        )
+
+                        val response = RetrofitClient.service.generateContent(apiKey, request)
+                        val fullResponseText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+
+                        if (fullResponseText != null) {
+                            val splitResult = fullResponseText.split("=== SUMMARY ===")
+                            var transcriptVal = splitResult.getOrNull(0)?.replace("=== TRANSCRIPT ===", "")?.trim()
+                            var summaryVal = splitResult.getOrNull(1)?.trim()
+
+                            if (transcriptVal.isNullOrBlank() || summaryVal.isNullOrBlank()) {
+                                transcriptVal = fullResponseText
+                                summaryVal = "خلاصه گفتگو در متن گفتگو گنجانده شده است."
+                            }
+
+                            repository.updateAudioNotePart(
+                                part.copy(
+                                    transcript = transcriptVal,
+                                    summary = summaryVal,
+                                    status = "success"
+                                )
+                            )
+                        } else {
+                            repository.updateAudioNotePart(
+                                part.copy(
+                                    status = "failed",
+                                    transcript = "پاسخی از هوش مصنوعی برای این بخش دریافت نشد."
+                                )
+                            )
+                            // Stop processing further parts since we encountered an issue (e.g. key/rate limit)
+                            repository.updateAudioNote(
+                                repository.getAudioNoteByIdSuspend(noteId)!!.copy(status = "failed")
+                            )
+                            return@launch
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        repository.updateAudioNotePart(
+                            part.copy(
+                                status = "failed",
+                                transcript = "خطا در پردازش هوش مصنوعی: ${e.localizedMessage}"
+                            )
+                        )
+                        repository.updateAudioNote(
+                            repository.getAudioNoteByIdSuspend(noteId)!!.copy(status = "failed")
+                        )
+                        return@launch
                     }
+                }
+
+                // Check final status of all parts
+                val finalParts = repository.getPartsForNoteSuspend(noteId)
+                val allSuccessful = finalParts.all { it.status == "success" }
+                val finishedCount = finalParts.count { it.status == "success" }
+                val finalProgressPercent = ((finishedCount.toFloat() / finalParts.size.toFloat()) * 100).toInt()
+
+                if (allSuccessful) {
+                    val combinedTranscript = finalParts.joinToString("\n\n") { "--- بخش ${it.partNumber} ---\n${it.transcript}" }
+                    val combinedSummary = finalParts.joinToString("\n\n") { "--- خلاصه بخش ${it.partNumber} ---\n${it.summary}" }
 
                     repository.updateAudioNote(
-                        note.copy(
-                            transcript = transcriptVal,
-                            summary = summaryVal,
-                            status = "success"
+                        repository.getAudioNoteByIdSuspend(noteId)!!.copy(
+                            status = "success",
+                            progressPercent = 100,
+                            transcript = combinedTranscript,
+                            summary = combinedSummary
                         )
                     )
                 } else {
                     repository.updateAudioNote(
-                        note.copy(
+                        repository.getAudioNoteByIdSuspend(noteId)!!.copy(
                             status = "failed",
-                            transcript = "پاسخی از هوش مصنوعی دریافت نشد."
+                            progressPercent = finalProgressPercent
                         )
                     )
                 }
+
             } catch (e: Exception) {
                 e.printStackTrace()
                 repository.updateAudioNote(
                     note.copy(
                         status = "failed",
-                        transcript = "خطا در پردازش هوش مصنوعی: ${e.localizedMessage}"
+                        transcript = "خطای غیرمنتظره: ${e.localizedMessage}"
                     )
                 )
             }

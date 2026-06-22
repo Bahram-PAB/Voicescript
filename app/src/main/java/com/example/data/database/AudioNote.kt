@@ -13,5 +13,7 @@ data class AudioNote(
     val durationMs: Long = 0L,
     val transcript: String? = null,
     val summary: String? = null,
-    val status: String // "pending", "processing", "success", "failed"
+    val status: String, // "pending", "processing", "success", "failed"
+    val progressPercent: Int = 0,
+    val totalParts: Int = 0
 )

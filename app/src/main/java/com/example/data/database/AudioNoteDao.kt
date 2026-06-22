@@ -25,4 +25,24 @@ interface AudioNoteDao {
 
     @Query("DELETE FROM audio_notes WHERE id = :id")
     suspend fun deleteAudioNoteById(id: Int)
+
+    // --- AudioNote Parts Queries ---
+
+    @Query("SELECT * FROM audio_note_parts WHERE noteId = :noteId ORDER BY partNumber ASC")
+    fun getPartsForNote(noteId: Int): Flow<List<AudioNotePart>>
+
+    @Query("SELECT * FROM audio_note_parts WHERE noteId = :noteId ORDER BY partNumber ASC")
+    suspend fun getPartsForNoteSuspend(noteId: Int): List<AudioNotePart>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAudioNotePart(part: AudioNotePart): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAudioNoteParts(parts: List<AudioNotePart>)
+
+    @Update
+    suspend fun updateAudioNotePart(part: AudioNotePart)
+
+    @Query("DELETE FROM audio_note_parts WHERE noteId = :noteId")
+    suspend fun deletePartsForNote(noteId: Int)
 }

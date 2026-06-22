@@ -94,13 +94,13 @@ fun AudioSummarizerApp(viewModel: AudioViewModel) {
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         Scaffold(
             topBar = {
-                LargeTopAppBar(
+                TopAppBar(
                     title = {
                         Column {
                             Text(
                                 "صدانگار هوشمند",
                                 fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.titleLarge,
+                                style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Text(
@@ -121,7 +121,7 @@ fun AudioSummarizerApp(viewModel: AudioViewModel) {
                             )
                         }
                     },
-                    colors = TopAppBarDefaults.largeTopAppBarColors(
+                    colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
                         titleContentColor = MaterialTheme.colorScheme.onSurface
                     ),
@@ -367,6 +367,7 @@ fun AudioSummarizerApp(viewModel: AudioViewModel) {
                         items(notes, key = { it.id }) { note ->
                             AudioNoteCard(
                                 note = note,
+                                viewModel = viewModel,
                                 isPlaying = currentlyPlayingPath == note.filePath,
                                 isExpanded = activeExpandedNoteId == note.id,
                                 onTogglePlay = {
@@ -589,6 +590,7 @@ fun EmptyState() {
 @Composable
 fun AudioNoteCard(
     note: AudioNote,
+    viewModel: AudioViewModel,
     isPlaying: Boolean,
     isExpanded: Boolean,
     onTogglePlay: () -> Unit,
@@ -642,13 +644,51 @@ fun AudioNoteCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    StatusBadge(status = note.status)
+                    StatusBadge(status = note.status, progressPercent = note.progressPercent)
                     IconButton(
                         onClick = onDelete,
                         colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.error)
                     ) {
                         Icon(Icons.Default.Delete, contentDescription = "Delete record")
                     }
+                }
+            }
+
+            // Real-time progress bar if processing
+            if (note.status == "processing") {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    LinearProgressIndicator(
+                        progress = { note.progressPercent / 100f },
+                        modifier = Modifier.weight(1f).height(6.dp).clip(CircleShape),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.outlineVariant
+                    )
+                    Text(
+                        text = "${note.progressPercent}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            // Resume Button if failed (API key limit recovery)
+            if (note.status == "failed") {
+                Spacer(modifier = Modifier.height(10.dp))
+                Button(
+                    onClick = { viewModel.resumeProcessing(note.id) },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("پردازش مجدد بخش‌های باقی‌مانده", fontSize = 13.sp)
                 }
             }
 
@@ -714,9 +754,136 @@ fun AudioNoteCard(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // Summary Block
+                    // Render segments/parts separates if available
+                    val parts by viewModel.getPartsForNote(note.id).collectAsStateWithLifecycle()
+
+                    if (parts.isNotEmpty()) {
+                        Text(
+                            text = "بخش‌های گفتگو (تقسیم شده به بخش‌های ۱۵ دقیقه‌ای)",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+
+                        parts.forEach { part ->
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp)
+                                ),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "بخش ${part.partNumber} (${formatDuration(part.durationMs)})",
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        StatusBadge(status = part.status)
+                                    }
+
+                                    if (part.status == "success") {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "خلاصه گفتگو این بخش:",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = part.summary ?: "بدون خلاصه",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                lineHeight = 18.sp,
+                                                textDirection = TextDirection.ContentOrRtl
+                                            ),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+                                        )
+
+                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                                        Spacer(modifier = Modifier.height(8.dp))
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "متن کامل این بخش:",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            IconButton(
+                                                onClick = {
+                                                    part.transcript?.let { clipboardManager.setText(AnnotatedString(it)) }
+                                                },
+                                                modifier = Modifier.size(24.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.ContentCopy,
+                                                    contentDescription = "کپی متن بخش",
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = part.transcript ?: "بدون متن",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                lineHeight = 18.sp,
+                                                textDirection = TextDirection.ContentOrRtl
+                                            ),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    } else if (part.status == "processing") {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        LinearProgressIndicator(
+                                            modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape)
+                                        )
+                                        Text(
+                                            text = "درحال تبدیل با هوش مصنوعی...",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    } else if (part.status == "failed") {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "پردازش این بخش با خطا روبه‌رو شد. لطفا کلید API خود را بررسی کرده و دکمه تلاش مجدد بالا را بزنید.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    } else {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "در انتظار نوبت پردازش...",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.outline
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        Spacer(modifier = Modifier.height(14.dp))
+                    }
+
+                    // Combined Summary Block
                     Text(
-                        text = "خلاصه گفتگو",
+                        text = "خلاصه کل گفتگو",
                         fontWeight = FontWeight.Bold,
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.primary
@@ -740,14 +907,14 @@ fun AudioNoteCard(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Transcript Block
+                    // Combined Transcript Block
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "متن کامل گفتگو",
+                            text = "متن کامل کل گفتگو",
                             fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.primary
@@ -789,7 +956,7 @@ fun AudioNoteCard(
 
 // Status Badging
 @Composable
-fun StatusBadge(status: String) {
+fun StatusBadge(status: String, progressPercent: Int = 0) {
     val colorPair = when (status) {
         "success" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
         "processing" -> MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
@@ -798,7 +965,7 @@ fun StatusBadge(status: String) {
     }
     val persianLabel = when (status) {
         "success" -> "پایان موفق"
-        "processing" -> "در حال پردازش"
+        "processing" -> "در حال پردازش (${progressPercent}%)"
         "failed" -> "خطای پردازش"
         else -> "در انتظار"
     }
