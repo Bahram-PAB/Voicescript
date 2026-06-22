@@ -1,0 +1,78 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build Android App & Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+        continue-on-error: true
+
+      - name: Build with Gradle
+        run: ./gradlew assembleDebug --stacktrace
+        env:
+          # In case gradle needs any env vars
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Locate APK
+        id: locate_apk
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: No APK found"
+            exit 1
+          fi
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "found_apk=$APK_PATH" >> $GITHUB_OUTPUT
+
+      - name: Generate Release Tag & Name
+        id: release_meta
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+          else
+            TAG_NAME="v1.0.${{ github.run_number }}"
+          fi
+          echo "TAG=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "DATE=$(date +'%Y-%m-%d %H:%M')" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.TAG }}
+          name: Release ${{ steps.release_meta.outputs.TAG }} - ${{ steps.release_meta.outputs.DATE }}
+          draft: false
+          prerelease: false
+          files: |
+            ${{ env.APK_PATH }}
+          body: |
+            ### صدانگار هوشمند - بیلد موفقیت‌آمیز خودکار
+            
+            تغییرات جدید با موفقیت بیلد شد و فایل بیلد APK به این ریلیز الصاق گردید.
+            
+            - **نسخه ریلیز:** `${{ steps.release_meta.outputs.TAG }}`
+            - **تاریخ ساخت:** `${{ steps.release_meta.outputs.DATE }}`
+            - **شاخه:** `${{ github.ref_name }}`
+            - **شناسه اجرا:** `${{ github.run_id }}`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

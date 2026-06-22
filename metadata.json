@@ -1,0 +1,6 @@
+{
+  "name": "Audio Summarizer",
+  "description": "Transcribe and summarize voice recordings and uploaded audio files instantly using Gemini 3.5 Flash.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
