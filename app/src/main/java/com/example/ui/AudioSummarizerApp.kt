@@ -1,4 +1,5 @@
 package com.example.ui
+import com.example.BuildConfig
 
 import android.Manifest
 import android.content.Context
@@ -380,6 +381,22 @@ fun AudioSummarizerApp(viewModel: AudioViewModel) {
                                 onDelete = {
                                     viewModel.deleteNote(note)
                                 }
+                            )
+                        }
+                    }
+
+                    // Version Footer
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "نسخه ${BuildConfig.VERSION_NAME}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
                             )
                         }
                     }
