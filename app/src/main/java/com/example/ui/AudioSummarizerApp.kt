@@ -309,7 +309,7 @@ fun AudioSummarizerApp(viewModel: AudioViewModel) {
                                         ) {
                                             Icon(Icons.Default.AudioFile, contentDescription = null)
                                             Spacer(modifier = Modifier.width(8.dp))
-                                            Text("بارگذاری کلاسیک", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                            Text("بارگذاری", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                                         }
                                     }
                                 }
@@ -754,8 +754,9 @@ fun AudioNoteCard(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // Render segments/parts separates if available
-                    val parts by viewModel.getPartsForNote(note.id).collectAsStateWithLifecycle()
+                    // Render segments/parts separates if available using a remembered flow to prevent flickering and endless recompositions
+                    val partsFlow = remember(note.id, viewModel) { viewModel.getPartsForNoteFlow(note.id) }
+                    val parts by partsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
 
                     if (parts.isNotEmpty()) {
                         Text(

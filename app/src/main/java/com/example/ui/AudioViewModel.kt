@@ -25,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -148,6 +149,10 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resumeProcessing(noteId: Int) {
         transcribeAndSummarizeNote(noteId)
+    }
+
+    fun getPartsForNoteFlow(noteId: Int): Flow<List<AudioNotePart>> {
+        return repository.getPartsForNote(noteId)
     }
 
     fun getPartsForNote(noteId: Int): StateFlow<List<AudioNotePart>> {
