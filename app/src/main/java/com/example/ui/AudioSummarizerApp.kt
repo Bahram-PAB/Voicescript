@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -758,7 +759,7 @@ fun AudioNoteCard(
                     val partsFlow = remember(note.id, viewModel) { viewModel.getPartsForNoteFlow(note.id) }
                     val parts by partsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
 
-                    if (parts.isNotEmpty()) {
+                    if (parts.size > 1) {
                         Text(
                             text = "بخش‌های گفتگو (تقسیم شده به بخش‌های ۱۵ دقیقه‌ای)",
                             fontWeight = FontWeight.Bold,
@@ -883,12 +884,47 @@ fun AudioNoteCard(
                     }
 
                     // Combined Summary Block
-                    Text(
-                        text = "خلاصه کل گفتگو",
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "خلاصه کل گفتگو",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        if (!note.summary.isNullOrBlank() && note.status == "success") {
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(note.summary))
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("کپی خلاصه", fontSize = 12.sp)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        val shareIntent = Intent().apply {
+                                            action = Intent.ACTION_SEND
+                                            putExtra(Intent.EXTRA_TEXT, note.summary)
+                                            type = "text/plain"
+                                        }
+                                        context.startActivity(Intent.createChooser(shareIntent, "اشتراک‌گذاری خلاصه"))
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("اشتراک‌گذاری", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(6.dp))
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp),
@@ -921,15 +957,32 @@ fun AudioNoteCard(
                             color = MaterialTheme.colorScheme.primary
                         )
                         if (!note.transcript.isNullOrBlank() && note.status == "success") {
-                            TextButton(
-                                onClick = {
-                                    clipboardManager.setText(AnnotatedString(note.transcript))
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("کپی متن", fontSize = 12.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(note.transcript))
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("کپی متن", fontSize = 12.sp)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        val shareIntent = Intent().apply {
+                                            action = Intent.ACTION_SEND
+                                            putExtra(Intent.EXTRA_TEXT, note.transcript)
+                                            type = "text/plain"
+                                        }
+                                        context.startActivity(Intent.createChooser(shareIntent, "اشتراک‌گذاری متن"))
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("اشتراک‌گذاری", fontSize = 12.sp)
+                                }
                             }
                         }
                     }

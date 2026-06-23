@@ -197,25 +197,39 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
                 // Get or create parts
                 var parts = repository.getPartsForNoteSuspend(noteId)
                 if (parts.isEmpty()) {
-                    // Split the file using AudioSplitter
-                    val splitDir = File(getApplication<Application>().cacheDir, "splits").apply { mkdirs() }
-                    // 15 minutes is 15 * 60 * 1000L ms
-                    val chunkDurationMs = 15 * 60 * 1000L
-                    val splitFiles = AudioSplitter.splitAudio(file, splitDir, chunkDurationMs)
+                    val durationMs = getAudioDuration(file)
+                    val chunkDurationMs = 15 * 60 * 1000L // 15 minutes
                     
-                    if (splitFiles.isEmpty()) {
-                        repository.updateAudioNote(note.copy(status = "failed", transcript = "خطا در بخش‌بندی فایل صوتی."))
-                        return@launch
-                    }
-
-                    val partsToInsert = splitFiles.mapIndexed { index, splitFile ->
-                        AudioNotePart(
-                            noteId = noteId,
-                            partNumber = index + 1,
-                            filePath = splitFile.absolutePath,
-                            durationMs = getAudioDuration(splitFile),
-                            status = "pending"
+                    val partsToInsert = if (durationMs <= chunkDurationMs) {
+                        // DO NOT SPLIT - Use the original file as a single part
+                        listOf(
+                            AudioNotePart(
+                                noteId = noteId,
+                                partNumber = 1,
+                                filePath = file.absolutePath,
+                                durationMs = durationMs,
+                                status = "pending"
+                            )
                         )
+                    } else {
+                        // Split the file using AudioSplitter
+                        val splitDir = File(getApplication<Application>().cacheDir, "splits").apply { mkdirs() }
+                        val splitFiles = AudioSplitter.splitAudio(file, splitDir, chunkDurationMs)
+                        
+                        if (splitFiles.isEmpty()) {
+                            repository.updateAudioNote(note.copy(status = "failed", transcript = "خطا در بخش‌بندی فایل صوتی."))
+                            return@launch
+                        }
+
+                        splitFiles.mapIndexed { index, splitFile ->
+                            AudioNotePart(
+                                noteId = noteId,
+                                partNumber = index + 1,
+                                filePath = splitFile.absolutePath,
+                                durationMs = getAudioDuration(splitFile),
+                                status = "pending"
+                            )
+                        }
                     }
                     repository.insertAudioNoteParts(partsToInsert)
                     parts = repository.getPartsForNoteSuspend(noteId)
