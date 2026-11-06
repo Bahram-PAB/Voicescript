@@ -15,13 +15,17 @@ import com.example.data.database.AudioNotePart
 import com.example.data.repository.AudioNoteRepository
 import com.example.util.AudioSplitter
 import com.example.data.network.Content
+import com.example.data.network.FileData
+import com.example.data.network.GeminiFileUploader
 import com.example.data.network.GenerateContentRequest
 import com.example.data.network.InlineData
 import com.example.data.network.Part
 import com.example.data.network.RetrofitClient
+import com.example.data.network.UploadedGeminiFile
 import com.example.util.AudioPlayer
 import com.example.util.AudioRecorder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +35,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
+import java.util.Locale
 
 class AudioViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: AudioNoteRepository
@@ -42,6 +48,10 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("audio_summarizer_prefs", Context.MODE_PRIVATE)
     private val _userApiKey = MutableStateFlow(prefs.getString("gemini_api_key", "") ?: "")
     val userApiKey: StateFlow<String> = _userApiKey.asStateFlow()
+
+    // Files up to this length (and <= inlineMaxSizeBytes) are embedded inline as Base64;
+    // anything longer goes through the Gemini Files API (no ~20MB inline payload limit).
+    private val inlineMaxDurationMs = 15 * 60 * 1000L
 
     fun updateApiKey(newKey: String) {
         prefs.edit().putString("gemini_api_key", newKey).apply()
@@ -196,41 +206,65 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Get or create parts
                 var parts = repository.getPartsForNoteSuspend(noteId)
-                if (parts.isEmpty()) {
-                    val durationMs = getAudioDuration(file)
-                    val chunkDurationMs = 15 * 60 * 1000L // 15 minutes
-                    
-                    val partsToInsert = if (durationMs <= chunkDurationMs) {
-                        // DO NOT SPLIT - Use the original file as a single part
-                        listOf(
-                            AudioNotePart(
-                                noteId = noteId,
-                                partNumber = 1,
-                                filePath = file.absolutePath,
-                                durationMs = durationMs,
-                                status = "pending"
-                            )
-                        )
-                    } else {
-                        // Split the file using AudioSplitter
-                        val splitDir = File(getApplication<Application>().cacheDir, "splits").apply { mkdirs() }
-                        val splitFiles = AudioSplitter.splitAudio(file, splitDir, chunkDurationMs)
-                        
-                        if (splitFiles.isEmpty()) {
-                            repository.updateAudioNote(note.copy(status = "failed", transcript = "خطا در بخش‌بندی فایل صوتی."))
-                            return@launch
-                        }
+                // partNumber -> already-uploaded Files API reference (avoids re-uploading on each retry)
+                val uploadedFileRefs = mutableMapOf<Int, UploadedGeminiFile>()
 
-                        splitFiles.mapIndexed { index, splitFile ->
-                            AudioNotePart(
-                                noteId = noteId,
-                                partNumber = index + 1,
-                                filePath = splitFile.absolutePath,
-                                durationMs = getAudioDuration(splitFile),
-                                status = "pending"
-                            )
+                if (parts.isEmpty()) {
+                    val durationMs = if (note.durationMs > 0) note.durationMs else getAudioDuration(file)
+                    val inlineMaxSizeBytes = 15L * 1024 * 1024 // base64 grows ~1.37x, stay under the 20MB request limit
+
+                    // The file goes through the Files API unless it is short AND small enough
+                    // to be safely embedded as inline Base64 in a single request.
+                    val canInline = durationMs > 0 && durationMs <= inlineMaxDurationMs &&
+                        file.length() <= inlineMaxSizeBytes
+
+                    var partsToInsert = listOf(
+                        AudioNotePart(
+                            noteId = noteId,
+                            partNumber = 1,
+                            filePath = file.absolutePath,
+                            mimeType = normalizeAudioMimeType(note.mimeType),
+                            durationMs = durationMs,
+                            status = "pending",
+                            useFileApi = !canInline
+                        )
+                    )
+
+                    if (!canInline) {
+                        // Upload the whole file up-front; one request then covers the entire
+                        // recording (e.g. 1 hour of audio), no splitting required.
+                        val uploaded = uploadFileWithRetry(apiKey, file, normalizeAudioMimeType(note.mimeType))
+                        if (uploaded != null) {
+                            uploadedFileRefs[1] = uploaded
+                        } else {
+                            // Offline fallback for MP4-based files: split into chunks small
+                            // enough to be sent inline Base64.
+                            val isMp4Based = when (file.extension.lowercase(Locale.ROOT)) {
+                                "m4a", "mp4" -> true
+                                else -> normalizeAudioMimeType(note.mimeType) == "audio/mp4"
+                            }
+                            if (isMp4Based) {
+                                val splitDir = File(getApplication<Application>().cacheDir, "splits").apply { mkdirs() }
+                                val splitFiles = AudioSplitter.splitAudio(file, splitDir, inlineMaxDurationMs)
+                                if (splitFiles.isNotEmpty()) {
+                                    partsToInsert = splitFiles.mapIndexed { index, splitFile ->
+                                        AudioNotePart(
+                                            noteId = noteId,
+                                            partNumber = index + 1,
+                                            filePath = splitFile.absolutePath,
+                                            mimeType = "audio/mp4",
+                                            durationMs = getAudioDuration(splitFile),
+                                            status = "pending",
+                                            useFileApi = false
+                                        )
+                                    }
+                                }
+                            }
+                            // Otherwise keep the single Files-API part; the processing loop
+                            // below retries the upload and reports a clear error if it never succeeds.
                         }
                     }
+
                     repository.insertAudioNoteParts(partsToInsert)
                     parts = repository.getPartsForNoteSuspend(noteId)
                 }
@@ -268,9 +302,6 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
                             continue
                         }
 
-                        val bytes = partFile.readBytes()
-                        val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
-
                         val promptText = """
                             You are an expert audio dialogue transcriber and summarizer. Your task is to transcribe the provided audio conversation and summarize it.
                             Provide your response EXACTLY in the following format. Do not add any conversational filler before or after.
@@ -282,19 +313,48 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
                             [Write a highly detailed, professional summary of this part of the conversation in Persian (Farsi), including: key topics, conclusions, and action items discussed in this part]
                         """.trimIndent()
 
+                        val audioPart: Part = if (part.useFileApi) {
+                            // Send the audio by reference via the Files API: no inline payload
+                            // size limit, so long recordings (e.g. ~1 hour) fit in one request.
+                            val uploaded = uploadedFileRefs[part.partNumber]
+                                ?: uploadFileWithRetry(apiKey, partFile, part.mimeType)?.also {
+                                    uploadedFileRefs[part.partNumber] = it
+                                }
+                                ?: throw IOException("آپلود فایل در سرور Gemini ناموفق بود. اتصال اینترنت و سهمیه کلید API را بررسی کنید.")
+                            Part(fileData = FileData(fileUri = uploaded.fileUri, mimeType = uploaded.mimeType))
+                        } else {
+                            // Short/small file: embed inline as Base64
+                            val bytes = partFile.readBytes()
+                            val base64Audio = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                            Part(inlineData = InlineData(mimeType = part.mimeType.ifBlank { note.mimeType }, data = base64Audio))
+                        }
+
                         val request = GenerateContentRequest(
                             contents = listOf(
                                 Content(
                                     parts = listOf(
                                         Part(text = promptText),
-                                        Part(inlineData = InlineData(mimeType = note.mimeType, data = base64Audio))
+                                        audioPart
                                     )
                                 )
                             )
                         )
 
-                        val response = RetrofitClient.service.generateContent(apiKey, request)
-                        val fullResponseText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                        // Retry transient network/API failures with backoff
+                        var response: GenerateContentResponse? = null
+                        var lastFailure: Exception? = null
+                        for (attempt in 1..3) {
+                            try {
+                                response = RetrofitClient.service.generateContent(apiKey, request)
+                                lastFailure = null
+                                break
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                                lastFailure = e
+                                if (attempt < 3) delay((attempt * 20_000L).coerceAtMost(60_000L))
+                            }
+                        }
+                        val fullResponseText = response?.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
 
                         if (fullResponseText != null) {
                             val splitResult = fullResponseText.split("=== SUMMARY ===")
@@ -317,7 +377,7 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
                             repository.updateAudioNotePart(
                                 part.copy(
                                     status = "failed",
-                                    transcript = "پاسخی از هوش مصنوعی برای این بخش دریافت نشد."
+                                    transcript = "پاسخی از هوش مصنوعی برای این بخش دریافت نشد${lastFailure?.localizedMessage?.let { msg -> ": $msg" } ?: ""}."
                                 )
                             )
                             // Stop processing further parts since we encountered an issue (e.g. key/rate limit)
@@ -411,6 +471,33 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         audioPlayer.stop()
         audioRecorder.stopRecording()
+    }
+
+    /**
+     * Uploads a file to the Gemini Files API with one automatic retry.
+     */
+    private suspend fun uploadFileWithRetry(apiKey: String, file: File, mimeType: String): UploadedGeminiFile? {
+        var result: UploadedGeminiFile? = null
+        repeat(2) { attempt ->
+            result = GeminiFileUploader.uploadAudio(apiKey, file, mimeType)
+            if (result != null) return result
+            if (attempt < 1) delay(5000)
+        }
+        return result
+    }
+
+    /**
+     * Maps MIME types reported by MediaRecorder / content resolver to the
+     * audio types officially recognized by the Gemini API.
+     */
+    private fun normalizeAudioMimeType(raw: String): String = when {
+        raw.contains("mpeg") || raw.contains("mp3") -> "audio/mp3"
+        raw.contains("x-m4a") || raw.contains("m4a") || raw.contains("mp4") -> "audio/mp4"
+        raw.contains("wav") -> "audio/wav"
+        raw.contains("ogg") || raw.contains("opus") -> "audio/ogg"
+        raw.contains("flac") -> "audio/flac"
+        raw.contains("aac") -> "audio/aac"
+        else -> raw
     }
 
     private fun getAudioDuration(file: File): Long {

@@ -20,7 +20,11 @@ data class AudioNotePart(
     val noteId: Int,
     val partNumber: Int, // 1, 2, ...
     val filePath: String,
+    val mimeType: String, // The MIME type of this part's file, needed for the API request
     val durationMs: Long,
+    // When true the audio is sent by reference (Files API) instead of inline Base64,
+    // which allows processing files larger than the ~20MB inline limit (e.g. 1 hour of audio)
+    val useFileApi: Boolean = false,
     val transcript: String? = null,
     val summary: String? = null,
     val status: String // "pending", "processing", "success", "failed"
