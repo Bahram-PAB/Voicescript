@@ -18,6 +18,7 @@ import com.example.data.network.Content
 import com.example.data.network.FileData
 import com.example.data.network.GeminiFileUploader
 import com.example.data.network.GenerateContentRequest
+import com.example.data.network.GenerateContentResponse
 import com.example.data.network.InlineData
 import com.example.data.network.Part
 import com.example.data.network.RetrofitClient
@@ -321,7 +322,7 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
                                     uploadedFileRefs[part.partNumber] = it
                                 }
                                 ?: throw IOException("آپلود فایل در سرور Gemini ناموفق بود. اتصال اینترنت و سهمیه کلید API را بررسی کنید.")
-                            Part(fileData = FileData(fileUri = uploaded.fileUri, mimeType = uploaded.mimeType))
+                            Part(fileData = FileData(fileUri = uploaded.uri, mimeType = uploaded.mimeType))
                         } else {
                             // Short/small file: embed inline as Base64
                             val bytes = partFile.readBytes()

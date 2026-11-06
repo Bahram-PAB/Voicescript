@@ -223,7 +223,7 @@ object GeminiFileUploader {
                         if (!uri.isNullOrBlank()) lastUri = uri
                         when {
                             state?.contains("ACTIVE") == true ->
-                                return UploadedGeminiFile(fileUri = lastUri, mimeType = mimeType)
+                                return UploadedGeminiFile(uri = lastUri, mimeType = mimeType)
                             state?.contains("FAILED") == true -> {
                                 Log.e(TAG, "File processing failed: $body")
                                 return null
