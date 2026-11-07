@@ -137,8 +137,8 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _processingStatus.value = "در حال بارگذاری فایل صوتی..."
             val file = copyUriToCache(context, uri)
-            if (file == null || !file.exists()) {
-                _errorMessage.value = "بارگذاری فایل صوتی با خطا مواجه شد."
+            if (file == null || !file.exists() || file.length() == 0L) {
+                _errorMessage.value = "فایل صوتی قابل خواندن نیست یا خالی است. فایل دیگری امتحان کنید."
                 _processingStatus.value = null
                 return@launch
             }
@@ -517,24 +517,55 @@ class AudioViewModel(application: Application) : AndroidViewModel(application) {
         return try {
             val contentResolver = context.contentResolver
             val mimeType = contentResolver.getType(uri) ?: "audio/mpeg"
+
+            // Try to get a meaningful filename from the URI
+            var fileName = "imported_${System.currentTimeMillis()}"
+            val cursor = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex >= 0) {
+                        val displayName = it.getString(nameIndex)
+                        if (!displayName.isNullOrBlank()) {
+                            fileName = displayName
+                        }
+                    }
+                }
+            }
+
             val extension = when {
                 mimeType.contains("mp3") -> "mp3"
                 mimeType.contains("wav") -> "wav"
-                mimeType.contains("m4a") -> "m4a"
+                mimeType.contains("m4a") || mimeType.contains("x-m4a") -> "m4a"
                 mimeType.contains("mp4") -> "m4a"
-                mimeType.contains("ogg") -> "ogg"
+                mimeType.contains("ogg") || mimeType.contains("opus") -> "ogg"
+                mimeType.contains("flac") -> "flac"
+                mimeType.contains("aac") -> "aac"
                 mimeType.contains("3gpp") -> "3gp"
-                else -> "m4a"
+                else -> {
+                    // Try to extract extension from filename
+                    val dotIndex = fileName.lastIndexOf('.')
+                    if (dotIndex >= 0 && dotIndex < fileName.length - 1) {
+                        fileName.substring(dotIndex + 1).lowercase()
+                    } else {
+                        "m4a"
+                    }
+                }
             }
-            val tempFile = File(context.cacheDir, "imported_${System.currentTimeMillis()}.$extension")
+
+            val tempFile = File(context.cacheDir, "${fileName}.$extension")
             contentResolver.openInputStream(uri)?.use { inputStream ->
                 tempFile.outputStream().use { outputStream ->
                     inputStream.copyTo(outputStream)
                 }
             }
-            tempFile
+            if (tempFile.exists() && tempFile.length() > 0) {
+                tempFile
+            } else {
+                null
+            }
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("AudioViewModel", "copyUriToCache failed", e)
             null
         }
     }
